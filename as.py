@@ -88,6 +88,11 @@ def chat_with_fntc_bot():
         logger.error(f"An error occurred with the Gemini API: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
+@app.route('/health', methods=['GET'])
+def health_check():
+    """A simple endpoint to verify that the service is running."""
+    return jsonify({"status": "ok"}), 200
+
 if __name__ == '__main__':
     # Remember to use host='0.0.0.0' to allow connections from your phone
     app.run(host='0.0.0.0', port=5000, debug=True)
