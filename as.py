@@ -102,13 +102,8 @@ If you've already made a payment and are experiencing issues, email **billing@fn
 
 model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC_BOT_PROMPT)
 
-
-# --- THIS IS THE FIX ---
-# We remove `@app.before_first_request` and create the tables here.
-# This code runs once when the application starts up.
 with app.app_context():
     db.create_all()
-    logger.info("Database tables checked/created on application startup.")
 
 
 # --- API Endpoints ---
@@ -126,6 +121,23 @@ def get_history(user_id):
         return jsonify(json.loads(history_entry.history_json)), 200
     else:
         return jsonify([]), 200
+
+@app.route('/history/<user_id>', methods=['DELETE'])
+def delete_history(user_id):
+    """Finds and deletes the chat history for a given user ID."""
+    try:
+        history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
+        if history_entry:
+            db.session.delete(history_entry)
+            db.session.commit()
+            logger.info(f"Deleted history for user_id: {user_id}")
+            return jsonify({"message": "History deleted successfully."}), 200
+        else:
+            # It's not an error if there was no history to delete
+            return jsonify({"message": "No history found to delete."}), 200
+    except Exception as e:
+        logger.error(f"Error deleting history for {user_id}: {e}")
+        return jsonify({"error": "An internal server error occurred."}), 500
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
