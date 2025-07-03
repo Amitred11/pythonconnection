@@ -105,7 +105,6 @@ model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC
 with app.app_context():
     db.create_all()
 
-
 # --- API Endpoints ---
 
 @app.route('/health', methods=['GET'])
@@ -113,55 +112,58 @@ def health_check():
     """A lightweight endpoint to check if the server is running."""
     return jsonify({"status": "ok"}), 200
 
-@app.route('/history/<user_id>', methods=['GET'])
-def get_history(user_id):
-    """Fetches the chat history for a given user ID."""
-    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
-    if history_entry:
-        return jsonify(json.loads(history_entry.history_json)), 200
-    else:
-        return jsonify([]), 200
-
-@app.route('/history/<user_id>', methods=['DELETE'])
-def delete_history(user_id):
-    """Finds and deletes the chat history for a given user ID."""
-    try:
+# --- THIS IS THE CORRECTED, COMBINED FUNCTION ---
+@app.route('/history/<user_id>', methods=['GET', 'DELETE'])
+def manage_history(user_id):
+    """
+    Handles both fetching (GET) and deleting (DELETE) chat history
+    for a given user ID.
+    """
+    if request.method == 'GET':
         history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
         if history_entry:
-            db.session.delete(history_entry)
-            db.session.commit()
-            logger.info(f"Deleted history for user_id: {user_id}")
-            return jsonify({"message": "History deleted successfully."}), 200
+            return jsonify(json.loads(history_entry.history_json)), 200
         else:
-            # It's not an error if there was no history to delete
-            return jsonify({"message": "No history found to delete."}), 200
-    except Exception as e:
-        logger.error(f"Error deleting history for {user_id}: {e}")
-        return jsonify({"error": "An internal server error occurred."}), 500
+            return jsonify([]), 200
+
+    if request.method == 'DELETE':
+        try:
+            history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
+            if history_entry:
+                db.session.delete(history_entry)
+                db.session.commit()
+                logger.info(f"Deleted history for user_id: {user_id}")
+                return jsonify({"message": "History deleted successfully."}), 200
+            else:
+                return jsonify({"message": "No history found to delete."}), 200
+        except Exception as e:
+            logger.error(f"Error deleting history for {user_id}: {e}")
+            return jsonify({"error": "An internal server error occurred."}), 500
+    
+    # Fallback for any other methods
+    return jsonify({"error": "Method not allowed"}), 405
+
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
+    """Handles chat requests, maintaining conversation history."""
     data = request.get_json()
     user_message = data.get('message')
     user_id = data.get('userId')
-    # The frontend now sends the full history including the new user message
     gemini_history = data.get('history', []) 
 
     if not user_message or not user_id:
         return jsonify({"error": "Missing 'message' or 'userId' parameter"}), 400
     
     try:
-        # Start a chat session with the full history provided by the client
-        chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message("...") # The actual content doesn't matter as much as the history
+        chat_session = model.start_chat(history=gemini_history[:-1])
+        response = chat_session.send_message(user_message)
         
-        # The new, updated history from the chat session
         updated_gemini_history = [
             {'role': entry.role, 'parts': [{'text': part.text} for part in entry.parts]}
             for entry in chat_session.history
         ]
         
-        # Save the updated history back to the database
         history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
         if history_entry:
             history_entry.history_json = json.dumps(updated_gemini_history)
@@ -170,11 +172,7 @@ def chat_with_fntc_bot():
             db.session.add(history_entry)
         db.session.commit()
 
-        # --- THE FIX: Send the complete, updated history back to the client ---
-        return jsonify({
-            "reply": response.text, # Keep this for potential single-message use
-            "history": updated_gemini_history # The new source of truth for the frontend
-        }), 200
+        return jsonify({ "history": updated_gemini_history }), 200
 
     except Exception as e:
         logger.error(f"Gemini API or DB error: {e}")
