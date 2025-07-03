@@ -1,28 +1,40 @@
-from flask import Flask, request, jsonify
+# flask_server.py
 import os
-import google.generativeai as genai # Import Google's library
+import google.generativeai as genai
+from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask_sqlalchemy import SQLAlchemy
 import logging
+import json
 
-# --- Flask & Gemini Setup ---
+# --- App & DB Configuration ---
 app = Flask(__name__)
 CORS(app)
+# Use an environment variable for the database URI for flexibility
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///chat_history.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# --- Database Model ---
+class ChatHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
+    # Store the history as a JSON string
+    history_json = db.Column(db.Text, nullable=False, default='[]')
+
 # --- Google Gemini API Configuration ---
 try:
-    # Get your API key from an environment variable
     api_key = os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise ValueError("GOOGLE_API_KEY environment variable not set!")
     genai.configure(api_key=api_key)
 except Exception as e:
     logger.critical(f"Failed to initialize Google Gemini client: {e}")
-    # The application cannot run without the API key.
     exit("Application requires GOOGLE_API_KEY to be set.")
 
-# --- Bot Persona Definition (Updated with Markdown link formatting) ---
+# --- Bot Persona Definition (Unchanged) ---
 FNTC_BOT_PROMPT = """
 You are "FNTC Bot," a helpful, polite, and technically knowledgeable customer support assistant for Fibear Network Technologies Corp. (FNTC), a postpaid internet service provider.
 
@@ -89,55 +101,67 @@ Facebook: [FiBear Network Technologies Corp. Montalban](https://www.facebook.com
 If you've already made a payment and are experiencing issues, email **billing@fntc.com** with a screenshot of your proof of payment.
 """
 
+model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC_BOT_PROMPT)
+
 @app.route('/health', methods=['GET'])
 def health_check():
-    """A simple endpoint for the client to check if the server is alive."""
     return jsonify({"status": "ok"}), 200
 
-# Initialize the Gemini model with the system prompt
-model = genai.GenerativeModel(
-    'gemini-1.5-flash-latest',
-    system_instruction=FNTC_BOT_PROMPT
-)
+@app.route('/history/<user_id>', methods=['GET'])
+def get_history(user_id):
+    """Fetches the chat history for a given user ID."""
+    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
+    if history_entry:
+        # The history is stored as a JSON string, so we parse it
+        return jsonify(json.loads(history_entry.history_json)), 200
+    else:
+        # No history found for this user, return an empty array
+        return jsonify([]), 200
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
     data = request.get_json()
     user_message = data.get('message')
-    history_from_client = data.get('history', [])
+    user_id = data.get('userId') # The frontend MUST now send the user's ID
 
-    if not user_message:
-        return jsonify({"error": "Missing 'message' parameter"}), 400
-
-    # --- History Conversion: Frontend (OpenAI format) to Gemini format ---
-    gemini_history = []
-    for item in history_from_client:
-        role = 'model' if item['role'] == 'assistant' else 'user'
-        gemini_history.append({'role': role, 'parts': [item['content']]})
-
-    logger.debug(f"Converted history for Gemini: {gemini_history}")
+    if not user_message or not user_id:
+        return jsonify({"error": "Missing 'message' or 'userId' parameter"}), 400
+    
+    # Retrieve existing history from DB
+    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
+    gemini_history = json.loads(history_entry.history_json) if history_entry else []
+    logger.debug(f"Retrieved history for {user_id}: {gemini_history}")
 
     try:
-        # Start a chat session with the converted history
         chat_session = model.start_chat(history=gemini_history)
-        
-        # Send the new message
         response = chat_session.send_message(user_message)
-        bot_reply = response.text
-        logger.debug(f"Received reply from Gemini: {bot_reply}")
+        
+        # The new, updated history from the chat session
+        updated_gemini_history = [
+            {'role': entry.role, 'parts': [{'text': part.text} for part in entry.parts]}
+            for entry in chat_session.history
+        ]
+        
+        # Save the updated history back to the database
+        if history_entry:
+            history_entry.history_json = json.dumps(updated_gemini_history)
+        else:
+            history_entry = ChatHistory(user_id=user_id, history_json=json.dumps(updated_gemini_history))
+            db.session.add(history_entry)
+        db.session.commit()
 
-        # --- History Conversion: Gemini format back to Frontend (OpenAI format) ---
-        client_history = []
-        for item in chat_session.history:
-            role = 'assistant' if item.role == 'model' else 'user'
-            client_history.append({'role': role, 'content': item.parts[0].text})
-
-        return jsonify({"reply": bot_reply, "history": client_history}), 200
+        # Respond to the client
+        return jsonify({
+            "reply": response.text,
+            "history": updated_gemini_history # Send the full history back
+        }), 200
 
     except Exception as e:
-        logger.error(f"An error occurred with the Gemini API: {e}")
+        logger.error(f"Gemini API or DB error: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
 if __name__ == '__main__':
-    # Use host='0.0.0.0' to allow connections from other devices on your network
+    with app.app_context():
+        # This will create the database file and table if they don't exist
+        db.create_all()
     app.run(host='0.0.0.0', port=5000, debug=True)
