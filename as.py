@@ -1,4 +1,4 @@
-# flask_server.py
+# as.py
 import os
 import google.generativeai as genai
 from flask import Flask, request, jsonify
@@ -99,13 +99,17 @@ Facebook: [FiBear Network Technologies Corp. Montalban](https://www.facebook.com
 If you've already made a payment and are experiencing issues, email **billing@fntc.com** with a screenshot of your proof of payment.
 """
 
+
 model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC_BOT_PROMPT)
 
-@app.before_first_request
-def create_tables():
-    """Ensures the database and tables are created before the first request."""
+
+# --- THIS IS THE FIX ---
+# We remove `@app.before_first_request` and create the tables here.
+# This code runs once when the application starts up.
+with app.app_context():
     db.create_all()
-    logger.info("Database tables checked/created.")
+    logger.info("Database tables checked/created on application startup.")
+
 
 # --- API Endpoints ---
 
@@ -114,11 +118,9 @@ def health_check():
     """A lightweight endpoint to check if the server is running."""
     return jsonify({"status": "ok"}), 200
 
-# --- THIS IS THE CORRECTED FUNCTION ---
 @app.route('/history/<user_id>', methods=['GET'])
 def get_history(user_id):
     """Fetches the chat history for a given user ID."""
-    # All of this code is now correctly indented
     history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
     if history_entry:
         return jsonify(json.loads(history_entry.history_json)), 200
@@ -160,8 +162,7 @@ def chat_with_fntc_bot():
         logger.error(f"Gemini API or DB error: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
+# This block is primarily for local development. Render will not run it.
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
