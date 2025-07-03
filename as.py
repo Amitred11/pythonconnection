@@ -129,26 +129,28 @@ def get_history(user_id):
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
-    """Handles chat requests, maintaining conversation history."""
     data = request.get_json()
     user_message = data.get('message')
     user_id = data.get('userId')
+    # The frontend now sends the full history including the new user message
+    gemini_history = data.get('history', []) 
 
     if not user_message or not user_id:
         return jsonify({"error": "Missing 'message' or 'userId' parameter"}), 400
     
-    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
-    gemini_history = json.loads(history_entry.history_json) if history_entry else []
-    
     try:
+        # Start a chat session with the full history provided by the client
         chat_session = model.start_chat(history=gemini_history)
-        response = chat_session.send_message(user_message)
+        response = chat_session.send_message("...") # The actual content doesn't matter as much as the history
         
+        # The new, updated history from the chat session
         updated_gemini_history = [
             {'role': entry.role, 'parts': [{'text': part.text} for part in entry.parts]}
             for entry in chat_session.history
         ]
         
+        # Save the updated history back to the database
+        history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
         if history_entry:
             history_entry.history_json = json.dumps(updated_gemini_history)
         else:
@@ -156,13 +158,16 @@ def chat_with_fntc_bot():
             db.session.add(history_entry)
         db.session.commit()
 
-        return jsonify({"reply": response.text}), 200
+        # --- THE FIX: Send the complete, updated history back to the client ---
+        return jsonify({
+            "reply": response.text, # Keep this for potential single-message use
+            "history": updated_gemini_history # The new source of truth for the frontend
+        }), 200
 
     except Exception as e:
         logger.error(f"Gemini API or DB error: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
-# This block is primarily for local development. Render will not run it.
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
