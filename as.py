@@ -101,29 +101,33 @@ If you've already made a payment and are experiencing issues, email **billing@fn
 
 model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC_BOT_PROMPT)
 
-# --- THIS IS THE FIX: Create DB before the first request ---
 @app.before_first_request
 def create_tables():
-    """
-    This function will run once before the very first request to the application.
-    It's the perfect place to ensure the database tables are created.
-    """
+    """Ensures the database and tables are created before the first request."""
     db.create_all()
-    logger.info("Database tables created or already exist.")
+    logger.info("Database tables checked/created.")
 
 # --- API Endpoints ---
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    """A lightweight endpoint to check if the server is running."""
     return jsonify({"status": "ok"}), 200
 
+# --- THIS IS THE CORRECTED FUNCTION ---
 @app.route('/history/<user_id>', methods=['GET'])
 def get_history(user_id):
-    # ... (This function is already correct)
+    """Fetches the chat history for a given user ID."""
+    # All of this code is now correctly indented
+    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
+    if history_entry:
+        return jsonify(json.loads(history_entry.history_json)), 200
+    else:
+        return jsonify([]), 200
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
-    # --- MODIFICATION: The reply now sends only the text, not the full history ---
+    """Handles chat requests, maintaining conversation history."""
     data = request.get_json()
     user_message = data.get('message')
     user_id = data.get('userId')
@@ -150,19 +154,14 @@ def chat_with_fntc_bot():
             db.session.add(history_entry)
         db.session.commit()
 
-        # Send back only the reply text, as the frontend will manage the display list
         return jsonify({"reply": response.text}), 200
 
     except Exception as e:
         logger.error(f"Gemini API or DB error: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
-
-# The if __name__ == '__main__': block is now only used for local development
 if __name__ == '__main__':
     with app.app_context():
-        # This is still good to have for local testing
         db.create_all()
     port = int(os.environ.get('PORT', 5000))
-    # Running with debug=True is fine for local development
     app.run(host='0.0.0.0', port=port, debug=True)
