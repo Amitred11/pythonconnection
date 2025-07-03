@@ -10,18 +10,16 @@ import json
 # --- App & DB Configuration ---
 app = Flask(__name__)
 CORS(app)
-# Use an environment variable for the database URI for flexibility
 app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///chat_history.db')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
-logging.basicConfig(level=logging.INFO) # Use INFO in production, DEBUG for dev
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Database Model ---
 class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.String(255), unique=True, nullable=False, index=True)
-    # Store the history as a JSON string for flexibility
     history_json = db.Column(db.Text, nullable=False, default='[]')
 
 # --- Google Gemini API Configuration ---
@@ -103,66 +101,68 @@ If you've already made a payment and are experiencing issues, email **billing@fn
 
 model = genai.GenerativeModel('gemini-1.5-flash-latest', system_instruction=FNTC_BOT_PROMPT)
 
+# --- THIS IS THE FIX: Create DB before the first request ---
+@app.before_first_request
+def create_tables():
+    """
+    This function will run once before the very first request to the application.
+    It's the perfect place to ensure the database tables are created.
+    """
+    db.create_all()
+    logger.info("Database tables created or already exist.")
+
 # --- API Endpoints ---
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """A lightweight endpoint to check if the server is running."""
     return jsonify({"status": "ok"}), 200
 
 @app.route('/history/<user_id>', methods=['GET'])
 def get_history(user_id):
-    """Fetches the chat history for a given user ID."""
-    history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
-    if history_entry:
-        return jsonify(json.loads(history_entry.history_json)), 200
-    else:
-        return jsonify([]), 200
+    # ... (This function is already correct)
 
 @app.route('/chat', methods=['POST'])
 def chat_with_fntc_bot():
-    """Handles chat requests, maintaining conversation history."""
+    # --- MODIFICATION: The reply now sends only the text, not the full history ---
     data = request.get_json()
     user_message = data.get('message')
-    user_id = data.get('userId') # Frontend MUST send the user's ID
+    user_id = data.get('userId')
 
     if not user_message or not user_id:
         return jsonify({"error": "Missing 'message' or 'userId' parameter"}), 400
     
-    # Retrieve existing history from DB
     history_entry = ChatHistory.query.filter_by(user_id=user_id).first()
     gemini_history = json.loads(history_entry.history_json) if history_entry else []
-    logger.debug(f"Retrieved history for {user_id}: {gemini_history}")
-
+    
     try:
         chat_session = model.start_chat(history=gemini_history)
         response = chat_session.send_message(user_message)
         
-        # The new, updated history from the chat session
         updated_gemini_history = [
             {'role': entry.role, 'parts': [{'text': part.text} for part in entry.parts]}
             for entry in chat_session.history
         ]
         
-        # Save the updated history back to the database
         if history_entry:
             history_entry.history_json = json.dumps(updated_gemini_history)
         else:
-            # Create a new entry if one doesn't exist
             history_entry = ChatHistory(user_id=user_id, history_json=json.dumps(updated_gemini_history))
             db.session.add(history_entry)
         db.session.commit()
 
-        # Respond to the client
+        # Send back only the reply text, as the frontend will manage the display list
         return jsonify({"reply": response.text}), 200
 
     except Exception as e:
         logger.error(f"Gemini API or DB error: {e}")
         return jsonify({"error": "The AI service encountered an error."}), 500
 
+
+# The if __name__ == '__main__': block is now only used for local development
 if __name__ == '__main__':
     with app.app_context():
+        # This is still good to have for local testing
         db.create_all()
-    # Use environment variable for port, default to 5000
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False) # Set debug=False for production
+    # Running with debug=True is fine for local development
+    app.run(host='0.0.0.0', port=port, debug=True)
